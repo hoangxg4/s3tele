@@ -2,15 +2,14 @@ ARG BINARY_NAME=s3tele
 FROM alpine:3.19 AS builder
 RUN apk add --no-cache ca-certificates tzdata
 WORKDIR /build
-COPY ${BINARY_NAME} .
-RUN chmod +x ${BINARY_NAME}
+COPY ${BINARY_NAME} s3tele
+RUN chmod +x s3tele
 
 FROM alpine:3.19
 RUN apk add --no-cache ca-certificates tzdata
 WORKDIR /app
-COPY --from=builder /build/${BINARY_NAME} ./s3tele
+COPY --from=builder /build/s3tele ./s3tele
 RUN chmod +x s3tele
-
 RUN mkdir -p /app/data
 
 EXPOSE 9000

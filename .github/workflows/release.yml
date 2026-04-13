@@ -12,35 +12,7 @@ permissions:
   packages: write
 
 jobs:
-  build-binaries:
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.25'
-
-      - name: Build AMD64
-        run: |
-          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w -extldflags=-static" -o s3tele-amd64 ./cmd/s3tele
-
-      - name: Build ARM64
-        run: |
-          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="-s -w -extldflags=-static" -o s3tele-arm64 ./cmd/s3tele
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: binaries
-          path: |
-            s3tele-amd64
-            s3tele-arm64
-
   build-docker:
-    needs: build-binaries
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -56,8 +28,7 @@ jobs:
           path: .
 
       - name: Set executable
-        run: |
-          chmod +x s3tele-amd64 s3tele-arm64
+        run: chmod +x s3tele-amd64 s3tele-arm64
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -74,6 +45,8 @@ jobs:
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             VERSION="${GITHUB_REF#refs/tags/v}"
+          elif [[ "$GITHUB_REF" == refs/tags/beta* ]]; then
+            VERSION="beta-${GITHUB_REF#refs/tags/beta}"
           else
             VERSION="latest"
           fi
@@ -88,31 +61,5 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository }}:${{ steps.version.outputs.VERSION }}
             ghcr.io/${{ github.repository }}:latest
-          build-args: |
-            BINARY_AMD64=s3tele-amd64
-            BINARY_ARM64=s3tele-arm64
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-  release:
-    needs: build-binaries
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: binaries
-          path: .
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            s3tele-amd64
-            s3tele-arm64
-          generate_release_notes: true

@@ -21,11 +21,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
+      - name: Download release assets
+        uses: actions/github-script@v7
         with:
-          name: binaries
-          path: .
+          script: |
+            const assets = await github.rest.repos.listReleaseAssets({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: context.payload.release.id
+            });
+            for (const asset of assets.data) {
+              console.log(`Downloading ${asset.name}`);
+              await github.rest.repos.downloadReleaseAsset({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                asset_id: asset.id,
+                archive_format: 'zip'
+              });
+            }
+
+      - name: Download using curl
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for asset in $(curl -s https://api.github.com/repos/${{ github.repository }}/releases/tags/${{ github.ref_name }} | jq -r '.assets[] | .name'); do
+            curl -L -o "$asset" "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/$asset"
+          done
 
       - name: Set executable
         run: chmod +x s3tele-amd64 s3tele-arm64

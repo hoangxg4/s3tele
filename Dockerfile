@@ -1,8 +1,12 @@
+FROM alpine:3.19 AS builder
+COPY s3tele-amd64 /usr/local/bin/s3tele
+RUN chmod +x /usr/local/bin/s3tele
+
 FROM alpine:3.19
 RUN apk add --no-cache ca-certificates tzdata
+COPY --from=builder /usr/local/bin/s3tele /app/s3tele
 WORKDIR /app
-COPY s3tele ./s3tele
-RUN chmod +x s3tele && mkdir -p /app/data
+RUN mkdir -p /app/data
 
 EXPOSE 9000
 
@@ -18,4 +22,4 @@ ENV BOT_ADMINS=
 ENV DATA_DIR=/app/data
 ENV CHUNK_SIZE=10485760
 
-CMD ["./s3tele"]
+CMD ["/app/s3tele"]

@@ -134,22 +134,39 @@ func (s *BotState) DeleteFile(chatID int64, bucket, obj string) { s.mu.Lock(); i
 type Storage struct {
 	config    StorageConfig
 	botState  *BotState
-	tgClient *telegram.Client
-	tgReady  chan bool
-	groupID  int64
+	tgClient  *telegram.Client
+	tgReady   chan bool
+	tgReadyOK bool
+	groupID   int64
 }
 
 func (s *Storage) waitForTelegram(timeout time.Duration) error {
-	if s.tgClient == nil || s.tgReady == nil {
+	log.Printf("[DEBUG] waitForTelegram: tgClient=%v, tgReady=%v, tgReadyOK=%v", s.tgClient != nil, s.tgReady != nil, s.tgReadyOK)
+	if s.tgClient == nil {
 		return fmt.Errorf("Telegram not configured")
 	}
+	if s.tgReadyOK {
+		log.Printf("[DEBUG] Telegram already connected")
+		return nil
+	}
+	if s.tgReady == nil {
+		return fmt.Errorf("Telegram not initialized")
+	}
+	log.Printf("[DEBUG] Waiting for Telegram to be ready...")
 	select {
-	case ok := <-s.tgReady:
+	case ok, okChan := <-s.tgReady:
+		if !okChan {
+			log.Printf("[DEBUG] Telegram channel closed")
+			return fmt.Errorf("Telegram channel closed")
+		}
+		log.Printf("[DEBUG] Telegram ready: ok=%v", ok)
 		if !ok {
 			return fmt.Errorf("Telegram connection failed")
 		}
+		s.tgReadyOK = true
 		return nil
 	case <-time.After(timeout):
+		log.Printf("[DEBUG] Telegram connection timeout")
 		return fmt.Errorf("Telegram connection timeout")
 	}
 }
@@ -642,45 +659,40 @@ func (s *S3Server) handleBot(msg BotMessage) {
 				rsp = "Exists"
 			} else {
 				var topicID int64
-				if s.storage.tgClient != nil && s.storage.tgReady != nil && s.groupID != 0 {
-					// Wait for Telegram to be ready
-					select {
-					case ok := <-s.storage.tgReady:
-						if !ok {
-							rsp = "Telegram not connected"
-							break
-						}
-					case <-time.After(10 * time.Second):
-						rsp = "Telegram connection timeout"
-						break
-					}
-
-					api := tg.NewClient(s.storage.tgClient)
-					peer := &tg.InputPeerChat{ChatID: s.groupID}
-					_, err := api.MessagesCreateForumTopic(context.Background(), &tg.MessagesCreateForumTopicRequest{
-						Peer:     peer,
-						Title:    name,
-						RandomID: time.Now().UnixNano(),
-					})
-					if err != nil {
-						rsp = fmt.Sprintf("Error: %v", err)
+				if s.storage.tgClient != nil && s.groupID != 0 {
+					log.Printf("[DEBUG] /createbucket: waiting for Telegram")
+					if err := s.storage.waitForTelegram(10 * time.Second); err != nil {
+						rsp = fmt.Sprintf("Telegram error: %v", err)
 					} else {
-						// Get forum topics to find the one we just created
-						result, err := api.MessagesGetForumTopics(context.Background(), &tg.MessagesGetForumTopicsRequest{
-							Peer:  peer,
-							Q:     name,
-							Limit: 1,
+						log.Printf("[DEBUG] /createbucket: creating topic in group %d", s.groupID)
+						api := tg.NewClient(s.storage.tgClient)
+						peer := &tg.InputPeerChat{ChatID: s.groupID}
+						log.Printf("[DEBUG] /createbucket: calling MessagesCreateForumTopic")
+						resp, err := api.MessagesCreateForumTopic(context.Background(), &tg.MessagesCreateForumTopicRequest{
+							Peer:     peer,
+							Title:    name,
+							RandomID: time.Now().UnixNano(),
 						})
-						if err == nil && len(result.Topics) > 0 {
-							if t, ok := result.Topics[0].(*tg.ForumTopic); ok {
-								topicID = int64(t.ID)
-							}
-						}
-						if topicID != 0 {
-							s.botState.SetBucket(cid, &UserBucket{Name: name, ChatID: cid, TopicID: topicID, CreatedAt: time.Now().UnixMilli()}, topicID)
-							rsp = fmt.Sprintf("✅ `%s` created (Topic: %d)", name, topicID)
+						log.Printf("[DEBUG] /createbucket: resp=%T, err=%v", resp, err)
+						if err != nil {
+							rsp = fmt.Sprintf("Error: %v", err)
 						} else {
-							rsp = fmt.Sprintf("✅ Topic `%s` created. Use /linktopic to link to bucket.", name)
+							result, err := api.MessagesGetForumTopics(context.Background(), &tg.MessagesGetForumTopicsRequest{
+								Peer:  peer,
+								Q:     name,
+								Limit: 1,
+							})
+							if err == nil && len(result.Topics) > 0 {
+								if t, ok := result.Topics[0].(*tg.ForumTopic); ok {
+									topicID = int64(t.ID)
+								}
+							}
+							if topicID != 0 {
+								s.botState.SetBucket(cid, &UserBucket{Name: name, ChatID: cid, TopicID: topicID, CreatedAt: time.Now().UnixMilli()}, topicID)
+								rsp = fmt.Sprintf("✅ `%s` created (Topic: %d)", name, topicID)
+							} else {
+								rsp = fmt.Sprintf("✅ Topic `%s` created. Use /linktopic to link to bucket.", name)
+							}
 						}
 					}
 				} else {
@@ -773,8 +785,10 @@ func main() {
 
 	// Initialize Telegram client
 	var tgClient *telegram.Client
-	var tgReady = make(chan bool, 1)
+	var tgReady chan bool
 	if cfg.Telegram.AppID > 0 && cfg.Telegram.AppHash != "" && cfg.Bot.Token != "" {
+		log.Printf("[DEBUG] Initializing Telegram client with AppID=%d, GroupID=%d", cfg.Telegram.AppID, cfg.Telegram.GroupID)
+		tgReady = make(chan bool, 1)
 		tgClient = telegram.NewClient(cfg.Telegram.AppID, cfg.Telegram.AppHash, telegram.Options{
 			NoUpdates: true,
 		})
@@ -792,7 +806,10 @@ func main() {
 				log.Printf("Telegram client error: %v", err)
 				tgReady <- false
 			}
+			close(tgReady)
 		}()
+	} else {
+		log.Printf("[DEBUG] Telegram not configured: AppID=%d, AppHash=%s, Token=%s", cfg.Telegram.AppID, cfg.Telegram.AppHash, cfg.Bot.Token)
 	}
 
 	dd := cfg.Storage.DataDir

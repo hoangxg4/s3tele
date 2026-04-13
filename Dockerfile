@@ -1,16 +1,27 @@
-ARG BINARY_NAME=s3tele
 FROM alpine:3.19 AS builder
-RUN apk add --no-cache ca-certificates tzdata
+RUN apk add --no-cache ca-certificates tzdata wget
 WORKDIR /build
-COPY ${BINARY_NAME} s3tele
-RUN chmod +x s3tele
+
+# Download and install Go for building
+RUN wget -q https://go.dev/dl/go1.25.1.linux-amd64.tar.gz && \
+    tar -xzf go1.25.1.linux-amd64.tar.gz -C /usr/local && \
+    rm go1.25.1.linux-amd64.tar.gz
+
+ENV GOROOT=/usr/local/go
+ENV PATH=/usr/local/go/bin:$PATH
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY cmd/s3tele ./cmd/s3tele
+
+RUN CGO_ENABLED=0 go build -ldflags="-s -w -extldflags=-static" -o s3tele ./cmd/s3tele
 
 FROM alpine:3.19
 RUN apk add --no-cache ca-certificates tzdata
 WORKDIR /app
 COPY --from=builder /build/s3tele ./s3tele
-RUN chmod +x s3tele
-RUN mkdir -p /app/data
+RUN chmod +x s3tele && mkdir -p /app/data
 
 EXPOSE 9000
 

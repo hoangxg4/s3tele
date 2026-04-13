@@ -135,7 +135,23 @@ type Storage struct {
 	config    StorageConfig
 	botState  *BotState
 	tgClient *telegram.Client
+	tgReady  chan bool
 	groupID  int64
+}
+
+func (s *Storage) waitForTelegram(timeout time.Duration) error {
+	if s.tgClient == nil || s.tgReady == nil {
+		return fmt.Errorf("Telegram not configured")
+	}
+	select {
+	case ok := <-s.tgReady:
+		if !ok {
+			return fmt.Errorf("Telegram connection failed")
+		}
+		return nil
+	case <-time.After(timeout):
+		return fmt.Errorf("Telegram connection timeout")
+	}
 }
 
 func (s *Storage) UploadObject(ctx context.Context, chatID int64, bucket, obj string, data []byte) (string, int64, error) {
@@ -144,6 +160,10 @@ func (s *Storage) UploadObject(ctx context.Context, chatID int64, bucket, obj st
 
 	if s.tgClient == nil {
 		return "", 0, fmt.Errorf("Telegram client not initialized")
+	}
+
+	if err := s.waitForTelegram(10 * time.Second); err != nil {
+		return "", 0, err
 	}
 
 	api := tg.NewClient(s.tgClient)
@@ -276,6 +296,10 @@ func (s *Storage) GetObject(ctx context.Context, chatID int64, bucket, obj strin
 		return nil, fmt.Errorf("file not available")
 	}
 
+	if err := s.waitForTelegram(10 * time.Second); err != nil {
+		return nil, err
+	}
+
 	api := tg.NewClient(s.tgClient)
 
 	loc := &tg.InputDocumentFileLocation{
@@ -306,10 +330,14 @@ func (s *Storage) DeleteObject(ctx context.Context, chatID int64, bucket, obj st
 	}
 
 	if s.tgClient != nil && m.DocumentID != 0 {
-		api := tg.NewClient(s.tgClient)
-		_, err := api.InvokeJSON(ctx, `{"@type":"messages.deleteMessages","id":[`+fmt.Sprintf("%d", m.MessageID)+`],"revoke":true}`, true)
-		if err != nil {
-			log.Printf("Failed to delete Telegram message: %v", err)
+		if err := s.waitForTelegram(10 * time.Second); err != nil {
+			log.Printf("Telegram not ready for delete: %v", err)
+		} else {
+			api := tg.NewClient(s.tgClient)
+			_, err := api.InvokeJSON(ctx, `{"@type":"messages.deleteMessages","id":[`+fmt.Sprintf("%d", m.MessageID)+`],"revoke":true}`, true)
+			if err != nil {
+				log.Printf("Failed to delete Telegram message: %v", err)
+			}
 		}
 	}
 
@@ -614,7 +642,19 @@ func (s *S3Server) handleBot(msg BotMessage) {
 				rsp = "Exists"
 			} else {
 				var topicID int64
-				if s.storage.tgClient != nil && s.groupID != 0 {
+				if s.storage.tgClient != nil && s.storage.tgReady != nil && s.groupID != 0 {
+					// Wait for Telegram to be ready
+					select {
+					case ok := <-s.storage.tgReady:
+						if !ok {
+							rsp = "Telegram not connected"
+							break
+						}
+					case <-time.After(10 * time.Second):
+						rsp = "Telegram connection timeout"
+						break
+					}
+
 					api := tg.NewClient(s.storage.tgClient)
 					peer := &tg.InputPeerChat{ChatID: s.groupID}
 					_, err := api.MessagesCreateForumTopic(context.Background(), &tg.MessagesCreateForumTopicRequest{
@@ -733,6 +773,7 @@ func main() {
 
 	// Initialize Telegram client
 	var tgClient *telegram.Client
+	var tgReady = make(chan bool, 1)
 	if cfg.Telegram.AppID > 0 && cfg.Telegram.AppHash != "" && cfg.Bot.Token != "" {
 		tgClient = telegram.NewClient(cfg.Telegram.AppID, cfg.Telegram.AppHash, telegram.Options{
 			NoUpdates: true,
@@ -745,9 +786,11 @@ func main() {
 					return err
 				}
 				log.Println("✅ Telegram connected")
+				tgReady <- true
 				return nil
 			}); err != nil {
 				log.Printf("Telegram client error: %v", err)
+				tgReady <- false
 			}
 		}()
 	}
@@ -757,7 +800,7 @@ func main() {
 	os.MkdirAll(dd, 0755)
 	botState := NewBotState(filepath.Join(dd, "bot_state.json"), dd)
 
-	storage := &Storage{config: cfg.Storage, botState: botState, tgClient: tgClient, groupID: cfg.Telegram.GroupID}
+	storage := &Storage{config: cfg.Storage, botState: botState, tgClient: tgClient, tgReady: tgReady, groupID: cfg.Telegram.GroupID}
 	server := NewS3Server(storage, cfg.Server, botState, cfg.Bot.Token, cfg.Bot.Admins, cfg.Telegram.GroupID)
 
 	if cfg.Bot.Token != "" { go server.startBot(context.Background()) }

@@ -171,6 +171,19 @@ func (s *Storage) waitForTelegram(timeout time.Duration) error {
 	}
 }
 
+// isConnected checks if Telegram client is still connected
+func (s *Storage) isConnected() bool {
+	if s.tgClient == nil {
+		return false
+	}
+	// Try a simple API call to check connection
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	api := tg.NewClient(s.tgClient)
+	_, err := api.AccountGetAutoDownloadSettings(ctx)
+	return err == nil
+}
+
 func (s *Storage) UploadObject(ctx context.Context, chatID int64, bucket, obj string, data []byte) (string, int64, error) {
 	hash := md5.Sum(data)
 	etag := "\"" + hex.EncodeToString(hash[:]) + "\""
@@ -663,18 +676,32 @@ func (s *S3Server) handleBot(msg BotMessage) {
 					log.Printf("[DEBUG] /createbucket: waiting for Telegram")
 					if err := s.storage.waitForTelegram(10 * time.Second); err != nil {
 						rsp = fmt.Sprintf("Telegram error: %v", err)
-					} else {
-						log.Printf("[DEBUG] /createbucket: creating topic in group %d", s.groupID)
-						api := tg.NewClient(s.storage.tgClient)
-						peer := &tg.InputPeerChat{ChatID: s.groupID}
-						log.Printf("[DEBUG] /createbucket: calling MessagesCreateForumTopic")
-						resp, err := api.MessagesCreateForumTopic(context.Background(), &tg.MessagesCreateForumTopicRequest{
+				} else {
+					log.Printf("[DEBUG] /createbucket: creating topic in group %d", s.groupID)
+					api := tg.NewClient(s.storage.tgClient)
+					peer := &tg.InputPeerChat{ChatID: s.groupID}
+					log.Printf("[DEBUG] /createbucket: calling MessagesCreateForumTopic")
+					
+					var resp tg.UpdatesClass
+					var err error
+					for i := 0; i < 3; i++ {
+						log.Printf("[DEBUG] /createbucket: attempt %d", i+1)
+						if i > 0 {
+							log.Printf("[DEBUG] /createbucket: waiting before retry...")
+							time.Sleep(2 * time.Second)
+						}
+						resp, err = api.MessagesCreateForumTopic(context.Background(), &tg.MessagesCreateForumTopicRequest{
 							Peer:     peer,
 							Title:    name,
 							RandomID: time.Now().UnixNano(),
 						})
 						log.Printf("[DEBUG] /createbucket: resp=%T, err=%v", resp, err)
-						if err != nil {
+						if err == nil {
+							break
+						}
+						log.Printf("[DEBUG] /createbucket: error, retrying: %v", err)
+					}
+					if err != nil {
 							rsp = fmt.Sprintf("Error: %v", err)
 						} else {
 							result, err := api.MessagesGetForumTopics(context.Background(), &tg.MessagesGetForumTopicsRequest{
